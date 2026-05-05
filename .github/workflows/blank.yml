@@ -1,17 +1,3 @@
-name: Generate TWRP Device Tree
-
-on:
-  workflow_dispatch:
-    inputs:
-      LIBRARY_NAME:
-        description: 'Library name for the device tree'
-        required: true
-        default: 'Twrp_Device_Generator'
-      IMG_URL:
-        description: 'URL to recovery/boot image'
-        required: true
-        default: 'https://github.com/momo54181/action_build_twrp_device_tree/raw/main/recovery.img'
-
 jobs:
   generate-device-tree:
     if: github.event.repository.owner.id == github.event.sender.id
@@ -30,7 +16,9 @@ jobs:
           cpio \
           wget \
           zip \
-          unzip
+          unzip \
+          simg-tools \
+          lz4
         
     - name: Install TWRP generator
       run: |
@@ -38,15 +26,32 @@ jobs:
         
     - name: Download recovery image
       run: |
-        wget -O recovery.img "${{ github.event.inputs.IMG_URL }}"
-        file recovery.img || true  # Display file info for debugging
-      
+        wget -q -O downloaded_file "${{ github.event.inputs.IMG_URL }}"
+        
+        # 检查是否为 lz4 压缩格式 (常见于三星)
+        if file downloaded_file | grep -q "LZ4"; then
+          echo "Detected LZ4 compression. Decompressing..."
+          lz4 -d downloaded_file recovery.img
+        else
+          mv downloaded_file recovery.img
+        fi
+
+        # 打印文件信息用于调试
+        echo "File info:"
+        file recovery.img
+        
+        # 尝试将可能为 sparse 的镜像转为 raw 格式
+        if file recovery.img | grep -i -q "sparse"; then
+          echo "Detected sparse image! Converting to raw image..."
+          mv recovery.img recovery_sparse.img
+          simg2img recovery_sparse.img recovery.img
+        fi
+
     - name: Generate device tree
       run: |
         mkdir -p device_tree_output
-        python3 -m twrpdtgen \
-          -o device_tree_output \
-          recovery.img
+        # 运行 twrpdtgen，添加了 verbose 参数输出更多日志
+        python3 -m twrpdtgen -o device_tree_output recovery.img
         
     - name: Compress device tree
       run: |
