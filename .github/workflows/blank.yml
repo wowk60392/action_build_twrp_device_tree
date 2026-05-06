@@ -36,15 +36,20 @@ jobs:
 
     - name: Download and Process Image
       run: |
-        # 下载镜像
-        aria2c "${{ github.event.inputs.IMG_URL }}"
-        IMG_NAME=$(ls *.img | head -n 1)
-        cp "$IMG_NAME" $HOME/AIK/recovery.img
-        
+        # 下载镜像，固定输出文件名，避免同名文件自动重命名
+        aria2c -o recovery.img "${{ github.event.inputs.IMG_URL }}"
+        if [ ! -f recovery.img ]; then
+          echo "下载失败：未找到 recovery.img"
+          ls -al
+          exit 1
+        fi
+
+        cp recovery.img $HOME/AIK/recovery.img
+
         cd $HOME/AIK
         # 1. 解包镜像
         sudo ./unpackimg.sh recovery.img
-        
+
         # 2. 【核心修复】针对 OPPO A11X 注入缺失的识别属性
         # 覆盖所有可能的 prop 路径，彻底解决 AssertionError
         for propfile in ramdisk/default.prop ramdisk/prop.default ramdisk/system/etc/prop.default; do
@@ -57,12 +62,20 @@ jobs:
             sudo sh -c "echo 'ro.product.model=OPPO A11X' >> $propfile"
           fi
         done
-        
+
         # 3. 重新打包
         sudo ./repackimg.sh
-        
-        # 4. 移回工作目录
-        cp image-new.img $GITHUB_WORKSPACE/recovery_fixed.img
+
+        # 4. 查找生成的镜像输出并移回工作目录
+        OUT_IMG=$(find . -maxdepth 1 -type f -name '*new.img' | head -n 1)
+        if [ -z "$OUT_IMG" ]; then
+          echo "重新打包失败：未找到 *new.img 输出文件"
+          ls -al
+          find . -type f | sort
+          exit 1
+        fi
+
+        cp "$OUT_IMG" "$GITHUB_WORKSPACE/recovery_fixed.img"
         cd $GITHUB_WORKSPACE
 
     - name: Generate Device Tree
