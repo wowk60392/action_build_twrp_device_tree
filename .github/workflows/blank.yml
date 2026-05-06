@@ -1,87 +1,107 @@
-name: Generate TWRP Device Tree
+name: Make TWRP Device Tree (OPPO A11X Fix)
 
 on:
   workflow_dispatch:
     inputs:
-      LIBRARY_NAME:
-        description: 'Library name for the device tree'
-        required: true
-        default: 'Twrp_Device_Generator'
       IMG_URL:
-        description: 'URL to recovery/boot image'
+        description: 'Recovery 镜像下载直链 (确保是 Raw 链接)'
         required: true
-        default: 'https://github.com/wowk60392/action_build_twrp_device_tree/blob/master/recovery.img'
+        default: ''
 
 jobs:
-  generate-device-tree:
+  build:
     if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-latest
-    
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Set up environment
+    - name: Check Out
+      uses: actions/checkout@main
+
+    - name: Prepare Environment
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          python3 \
-          python3-pip \
-          cpio \
-          wget \
-          zip \
-          unzip \
-          simg-tools \
-          lz4
+        sudo apt update
+        sudo apt -y install python3 python3-pip cpio wget aria2 libmagic1 file \
+                           lib32z1 lib32ncurses6 lib32stdc++6 \
+                           xz-utils gzip bzip2 git lz4 lzop device-tree-compiler tar
         
-    - name: Install TWRP generator
+        sudo pip3 install --upgrade pip
+        # 使用你测试稳定的 2.1.0 版本
+        sudo pip3 install twrpdtgen==2.1.0 python-magic
+        
+        # 克隆你测试成功的 SebaUbuntu AIK 镜像工具
+        git clone https://github.com/SebaUbuntu/AIK-Linux-mirror.git $HOME/AIK
+        chmod -R 777 $HOME/AIK
+
+    - name: Download and Process Image
       run: |
-        pip3 install --upgrade twrpdtgen
+        # 下载镜像
+        aria2c "${{ github.event.inputs.IMG_URL }}"
+        IMG_NAME=$(ls *.img | head -n 1)
+        cp "$IMG_NAME" $HOME/AIK/recovery.img
         
-    - name: Download recovery image
+        cd $HOME/AIK
+        # 1. 解包镜像
+        sudo ./unpackimg.sh recovery.img
+        
+        # 2. 【核心修复】针对 OPPO A11X 注入缺失的识别属性
+        # 覆盖所有可能的 prop 路径，彻底解决 AssertionError
+        for propfile in ramdisk/default.prop ramdisk/prop.default ramdisk/system/etc/prop.default; do
+          if [ -f "$propfile" ]; then
+            echo "--- 正在修复属性: $propfile ---"
+            sudo sh -c "echo 'ro.product.device=PCHM30' >> $propfile"
+            sudo sh -c "echo 'ro.product.system.device=PCHM30' >> $propfile"
+            sudo sh -c "echo 'ro.product.manufacturer=oppo' >> $propfile"
+            sudo sh -c "echo 'ro.product.brand=oppo' >> $propfile"
+            sudo sh -c "echo 'ro.product.model=OPPO A11X' >> $propfile"
+          fi
+        done
+        
+        # 3. 重新打包
+        sudo ./repackimg.sh
+        
+        # 4. 移回工作目录
+        cp image-new.img $GITHUB_WORKSPACE/recovery_fixed.img
+        cd $GITHUB_WORKSPACE
+
+    - name: Generate Device Tree
       run: |
-        wget -q -O downloaded_file "${{ github.event.inputs.IMG_URL }}"
-        
-        # 检查是否为 lz4 压缩格式 (常见于三星)
-        if file downloaded_file | grep -q "LZ4"; then
-          echo "Detected LZ4 compression. Decompressing..."
-          lz4 -d downloaded_file recovery.img
+        mkdir dt
+        # 使用修复了属性的镜像生成 DT
+        python3 -m twrpdtgen recovery_fixed.img -o dt/ || {
+          echo "自动识别仍有异常，尝试强制指定参数生成..."
+          python3 -m twrpdtgen recovery_fixed.img --manufacturer oppo --codename PCHM30 -o dt/
+        }
+
+    - name: ZIP Device Tree
+      if: always()
+      run: |
+        if [ -d "dt/oppo/PCHM30" ] || [ -d "dt/generic/generic" ]; then
+          zip -r DeviceTree_PCHM30.zip ./dt
+          echo "✅ 设备树生成成功！"
         else
-          mv downloaded_file recovery.img
+          echo "❌ 目录为空，生成失败。请检查日志。"
+          exit 1
         fi
 
-        # 打印文件信息用于调试
-        echo "File info:"
-        file recovery.img
-        
-        # 尝试将可能为 sparse 的镜像转为 raw 格式
-        if file recovery.img | grep -i -q "sparse"; then
-          echo "Detected sparse image! Converting to raw image..."
-          mv recovery.img recovery_sparse.img
-          simg2img recovery_sparse.img recovery.img
-        fi
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: TWRP_DT_OPPO_A11X
+        path: DeviceTree_PCHM30.zip
 
-    - name: Generate device tree
-      run: |
-        mkdir -p device_tree_output
-        # 运行 twrpdtgen，添加了 verbose 参数输出更多日志
-        python3 -m twrpdtgen -o device_tree_output recovery.img
-        
-    - name: Compress device tree
-      run: |
-        cd device_tree_output
-        zip -r ../DeviceTree_${{ github.run_number }}.zip .
-        cd ..
-        
-    - name: Create release with device tree
+    - name: Upload to Release (Optional)
+      if: success()
       uses: softprops/action-gh-release@v1
       with:
-        files: DeviceTree_${{ github.run_number }}.zip
-        name: TWRP_Device_Tree_${{ github.run_number }}
-        tag_name: dt-${{ github.run_number }}
+        files: ./DeviceTree_PCHM30.zip
+        name: TWRP_DT_PCHM30-${{ github.run_id }}
+        tag_name: ${{ github.run_id }}
         body: |
-          Automatically generated TWRP device tree
-          Build run: ${{ github.run_number }}
-          Source image: ${{ github.event.inputs.IMG_URL }}
+          Build Summary:
+          - Device: OPPO A11X (PCHM30)
+          - Tool: twrpdtgen 2.1.0 + AIK-SebaUbuntu
+          - Status: Fixed ro.product.device missing error.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
