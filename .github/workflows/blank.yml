@@ -1,3 +1,17 @@
+name: Generate TWRP Device Tree
+
+on:
+  workflow_dispatch:
+    inputs:
+      LIBRARY_NAME:
+        description: 'Library name for the device tree'
+        required: true
+        default: 'Twrp_Device_Generator'
+      IMG_URL:
+        description: 'URL to recovery/boot image'
+        required: true
+        default: 'https://github.com/wowk60392/action_build_twrp_device_tree/blob/master/recovery.img'
+
 jobs:
   generate-device-tree:
     if: github.event.repository.owner.id == github.event.sender.id
